@@ -1,0 +1,42 @@
+// Colors
+$primary-color: #6366f1; // Indigo
+$primary-light: #818cf8;
+$primary-dark: #4f46e5;
+$secondary-color: #ec4899; // Pink
+$accent-color: #10b981; // Emerald
+
+// Transition
+$transition-speed: 0.3s;
+$transition-ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+// Layout
+$header-height: 64px;
+$sidebar-width: 260px;
+$sidebar-collapsed-width: 64px;
+
+// Dark/Light themes custom properties will be injected into root
+:root {
+  --bg-color-primary: #f8fafc;
+  --bg-color-secondary: #ffffff;
+  --bg-color-card: rgba(255, 255, 255, 0.7);
+  --border-color: #e2e8f0;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --glass-bg: rgba(255, 255, 255, 0.45);
+  --glass-border: rgba(255, 255, 255, 0.4);
+  --shadow-color: rgba(99, 102, 241, 0.05);
+  --card-shadow: 0 4px 30px rgba(0, 0, 0, 0.03);
+}
+
+:root.dark {
+  --bg-color-primary: #09090b;
+  --bg-color-secondary: #0f0f12;
+  --bg-color-card: rgba(20, 20, 25, 0.6);
+  --border-color: #1f1f23;
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --glass-bg: rgba(15, 15, 18, 0.6);
+  --glass-border: rgba(255, 255, 255, 0.05);
+  --shadow-color: rgba(99, 102, 241, 0.15);
+  --card-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+}
