@@ -37,6 +37,10 @@ graph TD
     D --> D1[Three.js WebGL]
     D --> D2[CesiumJS 3D Earth]
     D --> D3[Maplibre GL 3D]
+    D --> D4[deck.gl GPU 渲染]
+    
+    D2 --> D2a[Cesium 测距/测面积/ECharts剖面]
+    D3 --> D3a[Maplibre + deck.gl 联动十万级航线]
     
     E --> E1[GSAP Timeline]
     E --> E2[Anime.js v4]
@@ -121,6 +125,7 @@ graph TD
 
 ### 🚀 阶段 7：地理空间 WebGL & 多线程计算优化
 - **Maplibre GL 3D 园区地图**：高性能 WebGL 矢量地图底图，加载 GeoJSON 绘制科技园区大楼的 **3D 建筑体块挤压拉伸**，支持基于滑块动态缩放建筑物高度，以及各城市间的 3D 飞行航线平滑转场（Fly-to）。
+- **Maplibre + deck.gl 进阶联动 (Option B)**：使用 `@deck.gl/mapbox` 将 deck.gl 渲染器作为 Overlay 叠加于 Maplibre 地图之上。支持渲染全球发光流动航线（ArcLayer）、动态散点聚集成 3D 蜂窝柱状体（HexagonLayer，其高度与颜色自适应数据密度变化）以及数万个高频扩散雷达散点（ScatterplotLayer）。配备自研 FPS 帧率计数器与 HUD 数据面板，支持在 1k - 100k 数据量及 Hexagon 聚合参数下动态调节并流畅渲染。
 - **Web Workers & Comlink 多线程计算**：使用 Comlink 进行 RPC 封装，在后台 Worker 中执行 150 万数据排序与 2500 万次数学迭代。提供主线程阻塞与 Worker 线程的⚙️齿轮帧率直观对比。
 - **Floating UI 高精度气泡与右键虚拟菜单**：支持自适应 flip（翻转）与 shift（位移）的 Tooltip，并基于 clientX/clientY 虚拟锚点实现画布区域的自定义右键快捷菜单。
 
@@ -145,6 +150,7 @@ graph TD
   - 预设著名坐标（珠峰、曼哈顿等）的 3D Fly-To 航线转场及自动绕点水平巡航。
   - 绘制 3D Billboard Pin、赤道轨迹线以及覆盖上海周边的 3D 电磁防护罩（防空网）。
   - 使用 `SampledPositionProperty` 物理计算并渲染卫星绕地球运动轨道动画。
+  - **交互式空间测量与剖面分析 (Option C)**：在三维地球上，使用 `ScreenSpaceEventHandler` 捕获鼠标左键点击（放置控制点）、鼠标移动（线段/多边形实时回显）与右键/双击（固化闭合），基于 `CallbackProperty` 绘制高帧率测距折线与测面积多边形。采用 `EllipsoidGeodesic` 测地线计算精确的球表面距离；通过 ENU 局部正交切平面投影与鞋带定理计算多边形面积。路径支持等距差值采样高程，开启 3D 地形时异步调用 `sampleTerrainMostDetailed` 获取真实海拔，在离线/无地形服务时采用高精度分形噪声算法模拟生成高程波形，联动 ECharts 图表展示精美的高度剖面图。
 - **Signature Pad 电子合同签署系统**：手写钢笔压感签字板，提供 NDA 合同模板，支持一键合成电子签名，并高清导出 A4 规格的 PDF 及 PNG。
 - **Rough Notation 手绘风格文本标注**：提供 Highlight/Underline/Box 等 6 种手写标注动效，支持鼠标悬停触发与顺序链式播放。
 

@@ -30,6 +30,13 @@
                 <el-button type="primary" @click="flyToDestination('manhattan')">🏙️ 纽约曼哈顿</el-button>
                 <el-button type="primary" @click="flyToDestination('grand_canyon')">🏜️ 科罗拉多大峡谷</el-button>
               </el-button-group>
+
+              <!-- 空间测量分析工具组 -->
+              <el-button-group size="small" class="ml-2">
+                <el-button :type="measureMode === 'distance' ? 'success' : 'default'" @click="startMeasure('distance')">📏 空间测距</el-button>
+                <el-button :type="measureMode === 'area' ? 'success' : 'default'" @click="startMeasure('area')">📐 空间测面积</el-button>
+                <el-button type="danger" plain @click="clearMeasurements">🗑️ 清除</el-button>
+              </el-button-group>
             </div>
 
             <div class="flex items-center gap-2">
@@ -78,10 +85,32 @@
             </div>
 
             <div class="cesium-tips">
-              💡 鼠标滚轮缩放，按住鼠标中键或右键拖拽调整 3D 倾斜相机视角
+              <span v-if="measureMode === 'distance'">📍 鼠标左键点击在地图上添加测量点，右键/双击结束并锁定测距路径。</span>
+              <span v-else-if="measureMode === 'area'">📐 鼠标左键点击在地图上添加顶点（至少3点），右键/双击闭合图形计算面积。</span>
+              <span v-else>💡 鼠标滚轮缩放，按住鼠标中键或右键拖拽调整 3D 倾斜相机视角</span>
             </div>
           </div>
         </DemoCard>
+
+        <!-- 高程剖面图卡片 -->
+        <el-card v-if="profileData.length > 0" shadow="hover" class="mt-4 profile-card animate__animated animate__fadeIn">
+          <template #header>
+            <div class="flex justify-between items-center flex-wrap gap-2">
+              <div class="font-bold flex items-center gap-2">
+                <span>📊 测距路径高程剖面分析</span>
+                <el-tag :type="isRealTerrain ? 'success' : 'info'" size="small">
+                  {{ isRealTerrain ? '🏔️ 真实地形数据采样' : '📡 算法仿真三维地形' }}
+                </el-tag>
+              </div>
+              <div class="text-xs text-secondary font-mono">
+                总长度: <span class="text-success font-bold">{{ formatDistance(totalMeasuredDistance) }}</span> | 
+                最低高程: <span class="text-info font-bold">{{ minElevation.toFixed(1) }} m</span> | 
+                最高高程: <span class="text-danger font-bold">{{ maxElevation.toFixed(1) }} m</span>
+              </div>
+            </div>
+          </template>
+          <div ref="profileChartRef" class="profile-chart-container"></div>
+        </el-card>
       </el-col>
 
       <el-col :xs="24" :lg="7" class="mb-4">
@@ -150,7 +179,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
   Viewer,
   Cartesian2,
@@ -166,16 +195,48 @@ import {
   ClockRange,
   ClockStep,
   PinBuilder,
-  VerticalOrigin
+  VerticalOrigin,
+  ScreenSpaceEventHandler,
+  ScreenSpaceEventType,
+  CallbackProperty,
+  PolygonHierarchy,
+  EllipsoidGeodesic,
+  Cartographic,
+  Transforms,
+  Matrix4,
+  sampleTerrainMostDetailed
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import { Loading } from '@element-plus/icons-vue'
+import * as echarts from '@/utils/echarts'
+import { useAppStore } from '@/stores/app'
+
+const appStore = useAppStore()
 
 // 本地响应式状态定义
 const loading = ref(true)          // 地球初始化加载指示器状态
 const isOrbiting = ref(false)      // 地球是否处于自转巡航状态
 const currentImagery = ref('dark')  // 当前激活的底图图层标识符
 const cameraInfo = ref<any>(null)  // 相机 HUD 遥测数据的响应式载体
+
+// 测量分析相关状态
+const measureMode = ref<'distance' | 'area' | null>(null)
+const totalMeasuredDistance = ref(0)
+const minElevation = ref(0)
+const maxElevation = ref(0)
+const isRealTerrain = ref(false)
+const profileData = ref<{ distance: number; elevation: number }[]>([])
+const profileChartRef = ref<HTMLDivElement | null>(null)
+
+// 临时绘制状态与实例（非响应式，防范性能劣化）
+let activePositions: Cartesian3[] = []
+const tempMousePosition = ref<Cartesian3 | null>(null)
+let pointEntities: Entity[] = []
+let labelEntities: Entity[] = []
+let activeLineEntity: Entity | null = null
+let activePolygonEntity: Entity | null = null
+let measureHandler: ScreenSpaceEventHandler | null = null
+let profileChartInstance: echarts.ECharts | null = null
 
 /**
  * 💡 关键设计避坑指南：
@@ -292,6 +353,9 @@ onMounted(async () => {
       destination: Cartesian3.fromDegrees(105.0, 35.0, 15000000), // WGS84度数: 经度105°, 纬度35°, 高度1.5万千米
       duration: 1.5 // 飞行用时持续 1.5 秒
     })
+
+    // 8. 监听窗口 resize 事件以自适应 ECharts
+    window.addEventListener('resize', handleResize)
   } catch (err) {
     console.error('Failed to initialize Cesium Viewer:', err)
     loading.value = false // 异常边界保护，防止动画常驻
@@ -301,11 +365,27 @@ onMounted(async () => {
 // 垃圾回收：卸载地球释放 WebGL 显存
 // ⚠️ 极其关键！如果不主动解绑监听并 destroy，WebGL context 资源将无法回收，路由切换数次后会导致显存耗尽页面白屏
 onUnmounted(() => {
-  // A. 取消正在执行的旋转帧动画
+  // 取消正在执行的旋转帧动画
   if (rotateTimer) {
     cancelAnimationFrame(rotateTimer)
   }
-  // B. 解绑相机监听事件，调用原生销毁方法，释放 WebGL Canvas 控制器
+
+  // 移除窗口 resize 监听
+  window.removeEventListener('resize', handleResize)
+
+  // 释放 ECharts 剖面图实例
+  if (profileChartInstance) {
+    profileChartInstance.dispose()
+    profileChartInstance = null
+  }
+
+  // 释放测量交互处理器
+  if (measureHandler) {
+    measureHandler.destroy()
+    measureHandler = null
+  }
+
+  // 解绑相机监听事件，调用原生销毁方法，释放 WebGL Canvas 控制器
   if (viewerInstance.value) {
     viewerInstance.value.camera.changed.removeEventListener(onCameraChange)
     viewerInstance.value.destroy()
@@ -613,6 +693,595 @@ const startOrbiting = () => {
   }
 }
 
+// ─── 空间测量与剖面分析算法实现 ──────────────────────────────────────────
+
+// 获取地球表面交点坐标（支持 3D 地面深度拾取）
+const getPickPosition = (windowPosition: Cartesian2) => {
+  const viewer = viewerInstance.value
+  if (!viewer) return null
+
+  let position = null
+  const scene = viewer.scene
+
+  // 1. 若深度测试开启，使用 pickPosition 获取带高程点
+  if (scene.globe.depthTestAgainstTerrain) {
+    position = scene.pickPosition(windowPosition)
+  }
+
+  // 2. 否则，使用 pick 投射光线拾取地表
+  if (!position) {
+    const ray = viewer.camera.getPickRay(windowPosition)
+    if (ray) {
+      position = scene.globe.pick(ray, scene)
+    }
+  }
+
+  // 3. 兜底方案：直接与基准 WGS84 椭球体求交点
+  if (!position) {
+    position = viewer.camera.pickEllipsoid(windowPosition, scene.globe.ellipsoid)
+  }
+
+  return position
+}
+
+// 格式化输出距离
+const formatDistance = (meters: number) => {
+  if (meters >= 1000) {
+    return `${(meters / 1000).toFixed(2)} km`
+  }
+  return `${meters.toFixed(1)} m`
+}
+
+// 格式化输出面积
+const formatArea = (squareMeters: number) => {
+  if (squareMeters >= 1000000) {
+    return `${(squareMeters / 1000000).toFixed(2)} km²`
+  }
+  return `${squareMeters.toFixed(1)} m²`
+}
+
+// 计算多边形面积（点集投射至 ENU 局部正交平面并使用鞋带公式）
+const calculateArea = (positions: Cartesian3[]) => {
+  if (positions.length < 3) return 0
+
+  // 1. 获取以第一个点为切点的 East-North-Up 局部切平面转换矩阵
+  const enuTransform = Transforms.eastNorthUpToFixedFrame(positions[0])
+  const invEnuTransform = Matrix4.inverse(enuTransform, new Matrix4())
+
+  // 2. 将所有 3D 笛卡尔坐标转换到 ENU 平面的 2D 坐标系 (x, y)，单位为米
+  const localPoints = positions.map(pos => {
+    const local = Matrix4.multiplyByPoint(invEnuTransform, pos, new Cartesian3())
+    return { x: local.x, y: local.y }
+  })
+
+  // 3. 运行平面鞋带公式 (Shoelace Formula)
+  let area = 0
+  const n = localPoints.length
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n
+    area += localPoints[i].x * localPoints[j].y
+    area -= localPoints[j].x * localPoints[i].y
+  }
+
+  return Math.abs(area) / 2.0 // 平方米
+}
+
+// 计算点集中心（用于悬浮文本标签的挂载）
+const calculateCentroid = (positions: Cartesian3[]) => {
+  let x = 0, y = 0, z = 0
+  positions.forEach(pos => {
+    x += pos.x
+    y += pos.y
+    z += pos.z
+  })
+  const n = positions.length
+  return new Cartesian3(x / n, y / n, z / n)
+}
+
+// 移去面积标注标签的实体
+const clearAreaLabels = () => {
+  const viewer = viewerInstance.value
+  if (!viewer) return
+  const label = viewer.entities.getById('area-measurement-label')
+  if (label) {
+    viewer.entities.remove(label)
+  }
+}
+
+// 开启测距或测面积绘制
+const startMeasure = (mode: 'distance' | 'area') => {
+  const viewer = viewerInstance.value
+  if (!viewer) return
+
+  // 清除上次测量数据
+  clearMeasurements()
+
+  measureMode.value = mode
+  activePositions = []
+  tempMousePosition.value = null
+
+  // 实例化鼠标事件监听器
+  const handler = new ScreenSpaceEventHandler(viewer.scene.canvas)
+  measureHandler = handler
+
+  // A. 左键点击：添加测量控制点
+  handler.setInputAction((clickEvent: any) => {
+    const position = getPickPosition(clickEvent.position)
+    if (!position) return
+
+    activePositions.push(position)
+
+    // 在地图上绘制标记点
+    const pt = viewer.entities.add({
+      position: position,
+      point: {
+        pixelSize: 8,
+        color: Color.YELLOW,
+        outlineColor: Color.BLACK,
+        outlineWidth: 2,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY
+      }
+    })
+    pointEntities.push(pt)
+
+    // 添加文本标注
+    if (activePositions.length === 1) {
+      // 起点
+      const startLbl = viewer.entities.add({
+        position: position,
+        label: {
+          text: '起点',
+          font: '12px Outfit, sans-serif',
+          fillColor: Color.YELLOW,
+          outlineColor: Color.BLACK,
+          outlineWidth: 2,
+          style: 2,
+          pixelOffset: new Cartesian2(0, -20),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY
+        }
+      })
+      labelEntities.push(startLbl)
+
+      // 根据绘制类型，初始化动态显示实体 (使用 CallbackProperty 关联鼠标移动)
+      if (mode === 'distance') {
+        activeLineEntity = viewer.entities.add({
+          polyline: {
+            positions: new CallbackProperty(() => {
+              if (tempMousePosition.value) {
+                return [...activePositions, tempMousePosition.value]
+              }
+              return activePositions
+            }, false),
+            width: 3.0,
+            material: Color.YELLOW,
+            depthFailMaterial: Color.YELLOW.withAlpha(0.3)
+          }
+        })
+      } else {
+        activeLineEntity = viewer.entities.add({
+          polyline: {
+            positions: new CallbackProperty(() => {
+              if (tempMousePosition.value) {
+                return [...activePositions, tempMousePosition.value, activePositions[0]]
+              }
+              return [...activePositions, activePositions[0]]
+            }, false),
+            width: 2.0,
+            material: Color.YELLOW,
+            depthFailMaterial: Color.YELLOW.withAlpha(0.3)
+          }
+        })
+      }
+    } else {
+      // 非首节点，累计距离或更新面积
+      if (mode === 'distance') {
+        let accumulatedDistance = 0
+        for (let i = 1; i < activePositions.length; i++) {
+          const c1 = Cartographic.fromCartesian(activePositions[i - 1])
+          const c2 = Cartographic.fromCartesian(activePositions[i])
+          const geodesic = new EllipsoidGeodesic(c1, c2)
+          accumulatedDistance += geodesic.surfaceDistance
+        }
+
+        const segmentLbl = viewer.entities.add({
+          position: position,
+          label: {
+            text: formatDistance(accumulatedDistance),
+            font: '12px Outfit, sans-serif',
+            fillColor: Color.YELLOW,
+            outlineColor: Color.BLACK,
+            outlineWidth: 2,
+            style: 2,
+            pixelOffset: new Cartesian2(0, -20),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY
+          }
+        })
+        labelEntities.push(segmentLbl)
+        totalMeasuredDistance.value = accumulatedDistance
+      }
+
+      // 面积模式且节点达到3个，初始化多边形实体
+      if (mode === 'area' && activePositions.length === 3 && !activePolygonEntity) {
+        activePolygonEntity = viewer.entities.add({
+          polygon: {
+            hierarchy: new CallbackProperty(() => {
+              const posList = tempMousePosition.value ? [...activePositions, tempMousePosition.value] : activePositions
+              return new PolygonHierarchy(posList)
+            }, false),
+            material: Color.YELLOW.withAlpha(0.25)
+          }
+        })
+      }
+
+      // 计算并更新面积 Label
+      if (mode === 'area' && activePositions.length >= 3) {
+        const area = calculateArea(activePositions)
+        const centroid = calculateCentroid(activePositions)
+
+        clearAreaLabels()
+        const areaLbl = viewer.entities.add({
+          id: 'area-measurement-label',
+          position: centroid,
+          label: {
+            text: `面积: ${formatArea(area)}`,
+            font: '13px Outfit, sans-serif',
+            fillColor: Color.YELLOW,
+            outlineColor: Color.BLACK,
+            outlineWidth: 2,
+            style: 2,
+            pixelOffset: new Cartesian2(0, 0),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY
+          }
+        })
+        labelEntities.push(areaLbl)
+      }
+    }
+  }, ScreenSpaceEventType.LEFT_CLICK)
+
+  // B. 鼠标移动：捕获当前鼠标点以提供 CallbackProperty 连线插值
+  handler.setInputAction((moveEvent: any) => {
+    if (activePositions.length > 0) {
+      const position = getPickPosition(moveEvent.endPosition)
+      if (position) {
+        tempMousePosition.value = position
+      }
+    }
+  }, ScreenSpaceEventType.MOUSE_MOVE)
+
+  // C. 鼠标右键/双击：结束测量与固化渲染
+  const finishDrawing = () => {
+    if (activePositions.length < 2) {
+      clearMeasurements()
+      return
+    }
+
+    // 移去 Callback 临时实体
+    if (activeLineEntity) {
+      viewer.entities.remove(activeLineEntity)
+      activeLineEntity = null
+    }
+
+    if (mode === 'distance') {
+      // 绘制最终静态实线
+      activeLineEntity = viewer.entities.add({
+        polyline: {
+          positions: [...activePositions],
+          width: 3.0,
+          material: Color.fromCssColorString('#10b981') // 变成科技绿
+        }
+      })
+      // 触发高程剖面提取
+      extractElevationProfile(activePositions)
+    } else {
+      if (activePolygonEntity) {
+        viewer.entities.remove(activePolygonEntity)
+        activePolygonEntity = null
+      }
+
+      if (activePositions.length >= 3) {
+        // 固化多边形
+        activePolygonEntity = viewer.entities.add({
+          polygon: {
+            hierarchy: new PolygonHierarchy([...activePositions]),
+            material: Color.fromCssColorString('#10b981').withAlpha(0.25)
+          }
+        })
+        // 封口边界线
+        activeLineEntity = viewer.entities.add({
+          polyline: {
+            positions: [...activePositions, activePositions[0]],
+            width: 2.0,
+            material: Color.fromCssColorString('#10b981')
+          }
+        })
+      }
+    }
+
+    // 注销绘制监听器并置空
+    if (measureHandler) {
+      measureHandler.destroy()
+      measureHandler = null
+    }
+    measureMode.value = null
+  }
+
+  handler.setInputAction(finishDrawing, ScreenSpaceEventType.RIGHT_CLICK)
+  handler.setInputAction(finishDrawing, ScreenSpaceEventType.LEFT_DOUBLE_CLICK)
+}
+
+// 清理所有空间测量要素
+const clearMeasurements = () => {
+  const viewer = viewerInstance.value
+  if (!viewer) return
+
+  if (measureHandler) {
+    measureHandler.destroy()
+    measureHandler = null
+  }
+
+  pointEntities.forEach(ent => viewer.entities.remove(ent))
+  pointEntities = []
+
+  labelEntities.forEach(ent => viewer.entities.remove(ent))
+  labelEntities = []
+
+  if (activeLineEntity) {
+    viewer.entities.remove(activeLineEntity)
+    activeLineEntity = null
+  }
+
+  if (activePolygonEntity) {
+    viewer.entities.remove(activePolygonEntity)
+    activePolygonEntity = null
+  }
+
+  clearAreaLabels()
+
+  measureMode.value = null
+  totalMeasuredDistance.value = 0
+  profileData.value = []
+  isRealTerrain.value = false
+
+  if (profileChartInstance) {
+    profileChartInstance.dispose()
+    profileChartInstance = null
+  }
+}
+
+// 折线折角路径高程点均匀采样与查询
+const extractElevationProfile = async (positions: Cartesian3[]) => {
+  const viewer = viewerInstance.value
+  if (!viewer || positions.length < 2) return
+
+  const sampleCount = 40 // 等距差值 40 个剖面节点
+  const interpolatedPoints: Cartesian3[] = []
+  const cumulativeDistances: number[] = []
+  const segmentDistances: number[] = []
+  let totalDist = 0
+
+  // 1. 计算各个分段长度
+  for (let i = 1; i < positions.length; i++) {
+    const c1 = Cartographic.fromCartesian(positions[i - 1])
+    const c2 = Cartographic.fromCartesian(positions[i])
+    const geodesic = new EllipsoidGeodesic(c1, c2)
+    const d = geodesic.surfaceDistance
+    segmentDistances.push(d)
+    totalDist += d
+  }
+
+  if (totalDist === 0) return
+
+  interpolatedPoints.push(positions[0])
+  cumulativeDistances.push(0)
+
+  let currentSegmentIdx = 0
+  let currentSegmentCovered = 0
+
+  // 2. 均匀插值
+  for (let s = 1; s < sampleCount; s++) {
+    const targetDist = (s / (sampleCount - 1)) * totalDist
+
+    while (
+      currentSegmentIdx < segmentDistances.length &&
+      currentSegmentCovered + segmentDistances[currentSegmentIdx] < targetDist
+    ) {
+      currentSegmentCovered += segmentDistances[currentSegmentIdx]
+      currentSegmentIdx++
+    }
+
+    if (currentSegmentIdx >= segmentDistances.length) {
+      interpolatedPoints.push(positions[positions.length - 1])
+      cumulativeDistances.push(totalDist)
+      continue
+    }
+
+    const pStart = positions[currentSegmentIdx]
+    const pEnd = positions[currentSegmentIdx + 1]
+    const segmentLength = segmentDistances[currentSegmentIdx]
+    const ratio = segmentLength > 0 ? (targetDist - currentSegmentCovered) / segmentLength : 0
+
+    const lerped = Cartesian3.lerp(pStart, pEnd, ratio, new Cartesian3())
+    interpolatedPoints.push(lerped)
+    cumulativeDistances.push(targetDist)
+  }
+
+  // 3. 高程查询
+  let elevations: number[] = []
+
+  if (envSettings.useTerrain) {
+    const cartographics = interpolatedPoints.map(p => Cartographic.fromCartesian(p))
+    try {
+      const updated = await sampleTerrainMostDetailed(viewer.terrainProvider, cartographics)
+      elevations = updated.map(c => c.height ?? 0)
+
+      // 判断采样出的是否全部是 0 海拔（离线状态下三维地球会返回全0）
+      const isFlat = elevations.every(h => Math.abs(h) < 1.0)
+      if (isFlat) {
+        elevations = generateSimulatedProfile(interpolatedPoints, cumulativeDistances)
+        isRealTerrain.value = false
+      } else {
+        isRealTerrain.value = true
+      }
+    } catch (e) {
+      console.warn('Failed to query terrain details, fallback to procedural simulation:', e)
+      elevations = generateSimulatedProfile(interpolatedPoints, cumulativeDistances)
+      isRealTerrain.value = false
+    }
+  } else {
+    // 地形关闭时使用高精度噪点数据做科技模拟展示
+    elevations = generateSimulatedProfile(interpolatedPoints, cumulativeDistances)
+    isRealTerrain.value = false
+  }
+
+  // 4. 组装数据
+  profileData.value = cumulativeDistances.map((dist, idx) => ({
+    distance: dist,
+    elevation: elevations[idx]
+  }))
+
+  minElevation.value = Math.min(...elevations)
+  maxElevation.value = Math.max(...elevations)
+
+  // 5. 渲染图表
+  nextTick(() => {
+    renderProfileChart()
+  })
+}
+
+// 基于正弦级数与分形噪声 (Fractal Noise) 生成仿真高程高度
+const generateSimulatedProfile = (points: Cartesian3[], cumulativeDistances: number[]) => {
+  const seed = points[0] ? (Math.abs(points[0].x) + Math.abs(points[0].y)) % 100 : 42
+  const totalDist = cumulativeDistances[cumulativeDistances.length - 1]
+
+  return cumulativeDistances.map(dist => {
+    const t = dist / totalDist
+    // 大山脊曲线 (海拔基准 400 - 1000米)
+    let elevation = 500 + Math.sin(t * Math.PI) * 500
+    // 中等尺度山体褶皱
+    elevation += Math.sin(t * Math.PI * 6 + seed) * 160
+    elevation += Math.cos(t * Math.PI * 13 + seed) * 45
+    // 高频岩石坡度抖动噪声
+    elevation += (Math.sin(t * Math.PI * 35 + seed * 2) + Math.random() - 0.5) * 8
+
+    return Math.max(10.0, elevation) // 确保不低于海平面
+  })
+}
+
+// 绘制 ECharts 剖面折线图
+const renderProfileChart = () => {
+  if (!profileChartRef.value) return
+
+  profileChartInstance = echarts.init(profileChartRef.value, appStore.isDark ? 'dark' : undefined)
+
+  const textColor = appStore.isDark ? '#a1a1aa' : '#4b5563'
+  const splitLineColor = appStore.isDark ? '#27272a' : '#f1f5f9'
+  const themeColor = '#10b981' // 科技绿
+
+  const distances = profileData.value.map(d => (d.distance / 1000).toFixed(2)) // km
+  const elevations = profileData.value.map(d => Math.round(d.elevation))
+
+  const option: echarts.EChartsOption = {
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: {
+        type: 'cross',
+        label: {
+          backgroundColor: '#1f2937',
+          color: '#fff',
+          fontSize: 10
+        }
+      },
+      formatter: (params: any) => {
+        const item = params[0]
+        return `<div style="padding: 4px 6px;">
+          <p style="margin: 0 0 4px 0; font-weight: bold; color: ${appStore.isDark ? '#fff' : '#1f2937'}; font-size: 12px;">📈 剖面采样点</p>
+          <span style="font-size: 11px; color: #a0aec0">累计距离:</span> <span style="font-weight: 500; font-family: monospace;">${item.axisValue} km</span><br/>
+          <span style="font-size: 11px; color: #a0aec0">点位海拔:</span> <span style="font-weight: bold; color: ${themeColor}; font-family: monospace;">${item.data} m</span>
+        </div>`
+      }
+    },
+    grid: {
+      left: '3%',
+      right: '3%',
+      bottom: '10%',
+      top: '12%',
+      containLabel: true
+    },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: distances,
+      axisLabel: {
+        color: textColor,
+        fontSize: 10,
+        formatter: '{value} km'
+      },
+      axisLine: { lineStyle: { color: splitLineColor } }
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: {
+        formatter: '{value} m',
+        color: textColor,
+        fontSize: 10
+      },
+      splitLine: { lineStyle: { color: splitLineColor } }
+    },
+    series: [
+      {
+        name: '海拔高度',
+        type: 'line',
+        smooth: true,
+        data: elevations,
+        symbol: 'circle',
+        symbolSize: 4,
+        showSymbol: false,
+        itemStyle: { color: themeColor },
+        lineStyle: { width: 2.5 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(16, 185, 129, 0.45)' },
+            { offset: 1, color: 'rgba(16, 185, 129, 0)' }
+          ])
+        },
+        markPoint: {
+          data: [
+            { type: 'max', name: '最高', itemStyle: { color: '#ef4444' } },
+            { type: 'min', name: '最低', itemStyle: { color: '#3b82f6' } }
+          ],
+          label: {
+            fontSize: 9,
+            color: '#fff',
+            position: 'top',
+            formatter: '{b}:\n{c}m'
+          }
+        }
+      }
+    ]
+  }
+
+  profileChartInstance.setOption(option)
+}
+
+// 统一 ECharts resize 控制器
+const handleResize = () => {
+  if (profileChartInstance) {
+    profileChartInstance.resize()
+  }
+}
+
+// 监听系统主题色切换以重绘 ECharts
+watch(() => appStore.isDark, () => {
+  if (profileChartInstance) {
+    profileChartInstance.dispose()
+    profileChartInstance = null
+    renderProfileChart()
+  }
+})
+
+// ─── 结束测量与剖面分析算法实现 ──────────────────────────────────────────
+
 // Demo Code for preview
 const cesiumExampleCode = `<template>
   <div id="cesium-container"></div>
@@ -812,5 +1481,29 @@ onMounted(() => {
       color: var(--text-primary);
     }
   }
+}
+
+.profile-card {
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+  margin-top: 16px;
+  
+  :deep(.el-card__header) {
+    border-bottom: 1px solid var(--border-color);
+    padding: 10px 16px;
+  }
+}
+
+.profile-chart-container {
+  width: 100%;
+  height: 220px;
+}
+
+.ml-2 {
+  margin-left: 8px;
+}
+
+.flex-wrap {
+  flex-wrap: wrap;
 }
 </style>

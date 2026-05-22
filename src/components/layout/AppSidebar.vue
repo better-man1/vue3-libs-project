@@ -66,6 +66,7 @@
           <el-menu-item index="/threejs/material-light">材质与光源</el-menu-item>
           <el-menu-item index="/threejs/earth">3D 炫酷地球</el-menu-item>
           <el-menu-item index="/threejs/animation">粒子星空动画</el-menu-item>
+          <el-menu-item index="/threejs/advanced">进阶 3D 场景</el-menu-item>
         </el-sub-menu>
 
         <!-- D3.js Submenu -->
@@ -161,6 +162,7 @@
           </template>
           <el-menu-item index="/cesium">CesiumJS 3D地球</el-menu-item>
           <el-menu-item index="/phase7/maplibre">Maplibre GL 3D 地图</el-menu-item>
+          <el-menu-item index="/phase7/deckgl">Maplibre + deck.gl 进阶</el-menu-item>
           <el-menu-item index="/phase7/comlink">Comlink 多线程计算</el-menu-item>
           <el-menu-item index="/phase7/floating">Floating UI 精准定位</el-menu-item>
         </el-sub-menu>

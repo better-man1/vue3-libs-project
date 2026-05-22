@@ -107,6 +107,11 @@ const routes: RouteRecordRaw[] = [
         name: 'ThreejsAnimation',
         component: () => import('@/views/threejs/AnimationDemo.vue'),
       },
+      {
+        path: 'threejs/advanced',
+        name: 'ThreejsAdvanced',
+        component: () => import('@/views/threejs/Advanced3D.vue'),
+      },
       // D3.js routes
       {
         path: 'd3js/bar',
@@ -269,6 +274,11 @@ const routes: RouteRecordRaw[] = [
         path: 'phase7/maplibre',
         name: 'MaplibreDemo',
         component: () => import('@/views/phase7/MaplibreDemo.vue'),
+      },
+      {
+        path: 'phase7/deckgl',
+        name: 'DeckGLDemo',
+        component: () => import('@/views/phase7/DeckGLDemo.vue'),
       },
       {
         path: 'phase7/comlink',
